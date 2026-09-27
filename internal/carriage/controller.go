@@ -74,3 +74,11 @@ func (c *Controller) Commands(run model.RunID) model.DeviceCommand {
     defer c.mu.Unlock()
     return c.active[run]
 }
+
+// Receipt 返回该运行最近一次刹停回执及是否存在。
+func (c *Controller) Receipt(run model.RunID) (model.DeviceReceipt, bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    receipt, ok := c.receipts[run]
+    return receipt, ok
+}

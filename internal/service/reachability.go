@@ -83,9 +83,31 @@ func ExerciseReachability(l *Laboratory, at time.Time) map[string]any {
     brakeLease, _ := brakeTracks.Arm(identities.Run, "brake-section", "brake-carriage", at)
     brakeController := carriage.NewController()
     brakeCommand := brakeController.Accelerate(identities.Run, brakeLease.Fence, brakeLease.Fence, 0.5, at)
-    brakeCoordinator := carriage.NewBrakeCoordinator(brakeController, brakeTracks)
+    brakePosition := carriage.NewPositionState(model.NewRevisionID())
+    brakePosition.SetWindow(5, 15)
+    brakeCoordinator := carriage.NewBrakeCoordinatorWithPosition(brakeController, brakeTracks, brakePosition)
     result["brake_hold"] = brakeCoordinator.Hold(identities.Run)
-    result["brake_release"] = brakeCoordinator.BrakeAndRelease(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at) == nil
+    // 回执缺失或位置未测量时不发布合格结论。
+    prematureVerification := brakeCoordinator.VerifyStop(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at)
+    result["stop_verified_before_brake"] = prematureVerification.Passed
+    result["stop_reason_before_brake"] = prematureVerification.Reason
+    _, _ = brakeController.Brake(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at)
+    brakePosition.Observe(10, at.Add(time.Millisecond))
+    stopVerification := brakeCoordinator.VerifyStop(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at.Add(2*time.Millisecond))
+    result["stop_verified"] = stopVerification.Passed
+    result["stop_verification"] = stopVerification
+    // 核验时刻过晚：回执与位置测量均过期，结论必须失效。
+    staleVerification := brakeCoordinator.VerifyStop(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at.Add(time.Second))
+    result["stop_verified_stale"] = staleVerification.Passed
+    result["stop_reason_stale"] = staleVerification.Reason
+    // 停在窗口外同样不合格。
+    brakePosition.Observe(42, at.Add(time.Millisecond))
+    outsideVerification := brakeCoordinator.VerifyStop(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at.Add(2*time.Millisecond))
+    result["stop_verified_outside"] = outsideVerification.Passed
+    result["stop_reason_outside"] = outsideVerification.Reason
+    // 回到允许区间后，刹停核验通过才释放轨道。
+    brakePosition.Observe(10, at.Add(2*time.Millisecond))
+    result["brake_release"] = brakeCoordinator.BrakeAndRelease(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at.Add(2*time.Millisecond)) == nil
 
     forceReceiver := force.NewReceiver()
     result["force_persist"] = force.Persist(forceReceiver, l.Store, identities.Run, identities.Revision, 3.5, at) == nil

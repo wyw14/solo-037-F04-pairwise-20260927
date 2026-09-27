@@ -106,7 +106,7 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     command := l.Carriage.Accelerate(operation.ID, 1, lease.Fence, 1.4, at.Add(time.Millisecond))
     l.Metrics.Event()
     l.Position.SetWindow(5, 15)
-    positionWindow := l.Position.Observe(10)
+    positionWindow := l.Position.Observe(10, at.Add(2*time.Millisecond))
     profile := wave.NewProfile(0.8, 0.01, 30*time.Millisecond)
     profileEvidence := wave.ProfileEvidence(operation.ID, operation.Revision, profile, at.Add(2*time.Millisecond))
     for index, evidence := range profileEvidence {
@@ -136,6 +136,11 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     if brakeErr == nil {
         l.Permits.ObserveBrake(operation.ID, receipt)
     }
+    // 刹停回执只证明速度归零；停稳后再次测量位置，并关联当前命令、
+    // 回执与轨道窗口发布带时间的停位核验。
+    l.Position.Observe(10, receipt.RecordedAt.Add(time.Millisecond))
+    stopVerification := carriage.NewBrakeCoordinatorWithPosition(l.Carriage, l.Tracks, l.Position).
+        VerifyStop(operation.ID, command.ID, command.Epoch, receipt.RecordedAt.Add(2*time.Millisecond))
     emergencyResult := l.Emergency.Execute(operation.ID, command.ID, command.Epoch, brakeErr, at.Add(7*time.Millisecond))
     l.TrackState.Clear(operation.ID, lease.Fence)
     _ = l.Tracks.Release(operation.ID)
@@ -157,6 +162,7 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
         "requirements": permit.RequirementMap(policyDecision),
         "reflection_ready": reflectionReady,
         "emergency": emergencyResult,
+        "stop_verification": stopVerification,
         "journal": journal.Summarize(records),
         "snapshot_runs": journal.SnapshotRuns(snapshot),
         "snapshot_error": errorText(snapshotErr),
