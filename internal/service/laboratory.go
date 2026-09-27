@@ -105,8 +105,10 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     l.TrackState.Assign(operation.ID, lease.Fence)
     command := l.Carriage.Accelerate(operation.ID, 1, lease.Fence, 1.4, at.Add(time.Millisecond))
     l.Metrics.Event()
+    l.Position.UpdateRevision(operation.Revision)
     l.Position.SetWindow(5, 15)
-    positionWindow := l.Position.Observe(10)
+    // 运动过程中的位置采样：只证明经过区间，不能作为停位证据。
+    l.Position.ObserveAt(10, at)
     profile := wave.NewProfile(0.8, 0.01, 30*time.Millisecond)
     profileEvidence := wave.ProfileEvidence(operation.ID, operation.Revision, profile, at.Add(2*time.Millisecond))
     for index, evidence := range profileEvidence {
@@ -136,9 +138,22 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     if brakeErr == nil {
         l.Permits.ObserveBrake(operation.ID, receipt)
     }
+    // 停稳后的位置测量必须晚于刹停回执，且落在当前版本的轨道窗口 [5,15] 内。
+    stopWindow := l.Position.ObserveAt(10, at.Add(7*time.Millisecond))
+    stopCoordinator := carriage.NewBrakeCoordinator(l.Carriage, l.Position, l.Tracks)
+    stopVerification := stopCoordinator.VerifyStop(carriage.StopVerificationRequest{
+        Run: operation.ID,
+        CommandID: command.ID,
+        Epoch: command.Epoch,
+        Revision: operation.Revision,
+        At: at.Add(7 * time.Millisecond),
+    })
     emergencyResult := l.Emergency.Execute(operation.ID, command.ID, command.Epoch, brakeErr, at.Add(7*time.Millisecond))
     l.TrackState.Clear(operation.ID, lease.Fence)
-    _ = l.Tracks.Release(operation.ID)
+    // 只有停位核验合格才释放轨道租约；过期/越界时保持占用，不发布合格结论。
+    if stopVerification.Acceptable {
+        _ = l.Tracks.Release(operation.ID)
+    }
     records := l.Store.Records()
     snapshot, snapshotErr := l.Snapshots.SaveRecords(records, at.Add(8*time.Millisecond))
     scenario := StandardScenario(operation.ID, operation.Revision, at)
@@ -149,7 +164,9 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     return map[string]any{
         "operation": operation,
         "lease": track.LeaseDescription(lease),
-        "position": positionWindow,
+        "stop_window": stopWindow,
+        "stop_verification": stopVerification,
+        "stop_position_acceptable": stopVerification.Acceptable,
         "analysis": analysis,
         "policy": policyDecision,
         "permit": permitResult,

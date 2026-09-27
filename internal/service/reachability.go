@@ -83,9 +83,51 @@ func ExerciseReachability(l *Laboratory, at time.Time) map[string]any {
     brakeLease, _ := brakeTracks.Arm(identities.Run, "brake-section", "brake-carriage", at)
     brakeController := carriage.NewController()
     brakeCommand := brakeController.Accelerate(identities.Run, brakeLease.Fence, brakeLease.Fence, 0.5, at)
-    brakeCoordinator := carriage.NewBrakeCoordinator(brakeController, brakeTracks)
+    brakeRevision := model.NewRevisionID()
+    brakePosition := carriage.NewPositionState(brakeRevision)
+    brakePosition.SetWindow(4, 12)
+    brakeCoordinator := carriage.NewBrakeCoordinator(brakeController, brakePosition, brakeTracks)
     result["brake_hold"] = brakeCoordinator.Hold(identities.Run)
-    result["brake_release"] = brakeCoordinator.BrakeAndRelease(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at) == nil
+    // 已刹停、速度归零，但尚无停稳后的位置测量：不得发布合格结论。
+    if _, err := brakeController.Brake(identities.Run, brakeCommand.ID, brakeCommand.Epoch, at); err != nil {
+        return result
+    }
+    premature := brakeCoordinator.VerifyStop(carriage.StopVerificationRequest{
+        Run: identities.Run, CommandID: brakeCommand.ID, Epoch: brakeCommand.Epoch,
+        Revision: brakeRevision, At: at, ReceiptFreshness: time.Second, PositionFreshness: time.Second,
+    })
+    result["brake_verify_without_measurement"] = premature.Reason == carriage.StopReasonNoMeasurement
+    // 刹停后测得停点 6（落在 [4,12]），核验合格才释放租约。
+    brakePosition.ObserveAt(6, at.Add(time.Millisecond))
+    releaseReq := carriage.StopVerificationRequest{
+        Run: identities.Run, CommandID: brakeCommand.ID, Epoch: brakeCommand.Epoch,
+        Revision: brakeRevision, At: at.Add(2 * time.Millisecond),
+        ReceiptFreshness: time.Second, PositionFreshness: time.Second,
+    }
+    brakeVerification, brakeReleaseErr := brakeCoordinator.BrakeVerifyAndRelease(releaseReq, at)
+    result["brake_release"] = brakeReleaseErr == nil
+    result["brake_stop_acceptable"] = brakeVerification.Acceptable
+    _, brakeLeaseHeld := brakeTracks.Lease(identities.Run)
+    result["brake_lease_released"] = !brakeLeaseHeld
+
+    // 回执与位置测量均已过期：核验必须拒绝且租约保持占用。
+    staleTank := tank.NewRegistry(2.3)
+    staleTracks := track.NewCoordinator(staleTank)
+    staleLease, _ := staleTracks.Arm(identities.Run, "stale-section", "stale-carriage", at)
+    staleController := carriage.NewController()
+    staleCommand := staleController.Accelerate(identities.Run, staleLease.Fence, staleLease.Fence, 0.5, at)
+    stalePosition := carriage.NewPositionState(brakeRevision)
+    stalePosition.SetWindow(4, 12)
+    staleCoordinator := carriage.NewBrakeCoordinator(staleController, stalePosition, staleTracks)
+    stalePosition.ObserveAt(6, at.Add(time.Millisecond))
+    staleReq := carriage.StopVerificationRequest{
+        Run: identities.Run, CommandID: staleCommand.ID, Epoch: staleCommand.Epoch,
+        Revision: brakeRevision, At: at.Add(time.Second),
+    }
+    staleVerification, staleErr := staleCoordinator.BrakeVerifyAndRelease(staleReq, at)
+    result["brake_stale_rejected"] = staleErr != nil && staleVerification.Reason == carriage.StopReasonReceiptStale
+    _, staleLeaseHeld := staleTracks.Lease(identities.Run)
+    result["brake_stale_lease_held"] = staleLeaseHeld
 
     forceReceiver := force.NewReceiver()
     result["force_persist"] = force.Persist(forceReceiver, l.Store, identities.Run, identities.Revision, 3.5, at) == nil

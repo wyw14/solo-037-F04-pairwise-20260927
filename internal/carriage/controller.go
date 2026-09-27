@@ -59,8 +59,36 @@ func (c *Controller) Brake(run model.RunID, commandID string, epoch uint64, at t
 func (c *Controller) Stopped(run model.RunID, commandID string, epoch uint64) bool {
     c.mu.Lock()
     defer c.mu.Unlock()
+    _, ok := c.stoppedReceipt(run, commandID, epoch)
+    return ok
+}
+
+// stoppedReceipt 在锁内返回与当前命令绑定的已确认停稳回执。
+func (c *Controller) stoppedReceipt(run model.RunID, commandID string, epoch uint64) (model.DeviceReceipt, bool) {
     receipt, ok := c.receipts[run]
-    return ok && receipt.CommandID == commandID && receipt.Epoch == epoch && receipt.Confirmed && c.velocities[run] == 0
+    if !ok || receipt.CommandID != commandID || receipt.Epoch != epoch || !receipt.Confirmed || c.velocities[run] != 0 {
+        return model.DeviceReceipt{}, false
+    }
+    return receipt, true
+}
+
+// StoppedAt 返回指定命令的停稳回执时间；回执缺失、与当前命令不符或未确认时第二返回值为 false。
+func (c *Controller) StoppedAt(run model.RunID, commandID string, epoch uint64) (time.Time, bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    receipt, ok := c.stoppedReceipt(run, commandID, epoch)
+    if !ok {
+        return time.Time{}, false
+    }
+    return receipt.RecordedAt, true
+}
+
+// Receipt 返回该试验最近一次刹停回执（若有）。
+func (c *Controller) Receipt(run model.RunID) (model.DeviceReceipt, bool) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    receipt, ok := c.receipts[run]
+    return receipt, ok
 }
 
 func (c *Controller) Velocity(run model.RunID) float64 {
